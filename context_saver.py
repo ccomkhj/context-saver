@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import time
 import webbrowser
+from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -329,9 +330,9 @@ def extract_bundled_skills(paths: Paths) -> list[tuple[str, str]]:
 
 
 def scan_user_skills(paths: Paths) -> list[dict]:
-    out = []
     if not paths.skills_dir.is_dir():
-        return out
+        return []
+    out = []
     for skill_md in sorted(paths.skills_dir.glob("*/SKILL.md")):
         fm = parse_frontmatter(skill_md)
         if not fm:
@@ -392,14 +393,15 @@ def _skill_record(name: str, fm: dict, source: str) -> dict:
 
 def scan_mcp_servers(paths: Paths, plugins: dict[str, Path], enabled: dict[str, bool]) -> list[dict]:
     claude_json, _ = read_json(paths.claude_json)
-    out = []
-    for name in sorted((claude_json.get("mcpServers") or {}).keys()):
-        out.append({"kind": "mcp", "name": name, "source": "user", "tokens": None})
+    out = [
+        {"kind": "mcp", "name": name, "source": "user", "tokens": None}
+        for name in sorted(claude_json.get("mcpServers") or {})
+    ]
     for key, install_path in sorted(plugins.items()):
         if not plugin_is_enabled(key, enabled):
             continue
         data, _ = read_json(install_path / ".mcp.json")
-        for name in sorted((data.get("mcpServers") or {}).keys()):
+        for name in sorted(data.get("mcpServers") or {}):
             out.append({"kind": "mcp", "name": name, "source": f"plugin:{key}", "tokens": None})
     return out
 
@@ -486,13 +488,13 @@ def build_state(paths: Paths, context_window: int = DEFAULT_CONTEXT_WINDOW,
         skill["usage"] = usage_for(claude_json, skill["name"])
         skill["shadows"] = shadows.get(item_key("skill", skill["name"]), [])
 
-    tokens_by_plugin: dict[str, int] = {}
-    counts_by_plugin: dict[str, int] = {}
+    tokens_by_plugin: defaultdict[str, int] = defaultdict(int)
+    counts_by_plugin: defaultdict[str, int] = defaultdict(int)
     for skill in skills:
         if skill["source"].startswith("plugin:"):
             key = skill["source"].split(":", 1)[1]
-            tokens_by_plugin[key] = tokens_by_plugin.get(key, 0) + skill["tokens"][skill["state"]]
-            counts_by_plugin[key] = counts_by_plugin.get(key, 0) + 1
+            tokens_by_plugin[key] += skill["tokens"][skill["state"]]
+            counts_by_plugin[key] += 1
 
     mcp = scan_mcp_servers(paths, plugins, enabled_plugins)
     for server in mcp:
@@ -517,10 +519,9 @@ def build_state(paths: Paths, context_window: int = DEFAULT_CONTEXT_WINDOW,
 
     # The master kill switch is the documented fallback for when extraction fails, so it is
     # only offered then - otherwise the individual bundled rows are the way to trim.
-    master_rows = (
-        []
-        if bundled
-        else [
+    master_rows: list[dict] = []
+    if not bundled:
+        master_rows.append(
             {
                 "kind": "bundled-master",
                 "name": "disableBundledSkills",
@@ -528,8 +529,7 @@ def build_state(paths: Paths, context_window: int = DEFAULT_CONTEXT_WINDOW,
                 "state": "off" if bundled_killed else "on",
                 "shadows": [],
             }
-        ]
-    )
+        )
 
     # Bundled gating cannot be verified offline (the CLI decides at runtime), so those
     # rows are subtotalled separately and never move the headline savings number.
